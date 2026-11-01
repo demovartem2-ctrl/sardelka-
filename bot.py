@@ -11,6 +11,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.types import Message
+from aiohttp import web
 
 # ---------- Конфиг ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
@@ -18,6 +19,7 @@ API_BASE = os.getenv("API_BASE", "https://misugram.cloud-ip.cc")
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "50"))
 COOLDOWN_SEC = int(os.getenv("COOLDOWN_SEC", "30"))
 DB_PATH = os.getenv("DB_PATH", "bot.db")
+PORT = int(os.getenv("PORT", "8080"))
 
 DROP_CHANCE = 0.5 
 
@@ -144,15 +146,30 @@ async def on_any_message(message: Message) -> None:
     )
     await message.reply(text, parse_mode="HTML")
 
-# ---------- Запуск (Polling) ----------
+# ---------- Веб-сервер для Render ----------
+async def health(request):
+    return web.Response(text="Bot is running!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    log.info(f"Web server started on port {PORT}")
+
+# ---------- Запуск ----------
 async def main() -> None:
     await init_db()
-    log.info("Starting polling...")
     
-    # Удаляем вебхук, если он был, чтобы бот мог работать в режиме опроса
+    # Запускаем веб-сервер в фоне (чтобы Render видел открытый порт)
+    await start_web_server()
+    
+    # Удаляем вебхук, если он был (чтобы polling работал)
     await bot.delete_webhook(drop_pending_updates=True)
     
-    # Запускаем бота
+    log.info("Starting polling...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
