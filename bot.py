@@ -16,14 +16,15 @@ from aiohttp import web
 # ---------- Конфиг ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 API_BASE = os.getenv("API_BASE", "https://misugram.cloud-ip.cc")
-DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "50"))
-COOLDOWN_SEC = int(os.getenv("COOLDOWN_SEC", "30"))
-# Теперь берем строку подключения из Render
-DATABASE_URL = os.getenv("DATABASE_URL") 
+DATABASE_URL = os.getenv("DATABASE_URL")
 PORT = int(os.getenv("PORT", "8080"))
 
-DROP_CHANCE = 100.0
-GIFT_ID = "9000000000000200"
+DAILY_LIMIT = 50
+COOLDOWN_SEC = 0 # Временно убрал кулдаун, чтобы можно было спамить для теста
+DROP_CHANCE = 100.0 # Временно 100%, чтобы точно проверить
+
+# ВАЖНО: Замени этот ID на реальный ID мишки (если 9000000000000200 не работает)
+GIFT_ID = "9000000000000200" 
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("nft-bot")
@@ -33,46 +34,23 @@ bot = Bot(token=BOT_TOKEN, session=session)
 dp = Dispatcher()
 db_pool = None
 
-# ---------- БД (PostgreSQL / Supabase) ----------
+# ---------- БД ----------
 async def init_db():
     global db_pool
     if not DATABASE_URL:
         log.error("DATABASE_URL не задан!")
         return
     try:
-        # Создаем пул соединений
         db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
         async with db_pool.acquire() as conn:
-            # Таблица дропов
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS drops (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT NOT NULL,
-                    username TEXT,
-                    chat_id BIGINT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            # Таблица счетчика подарков
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS gift_counter (
-                    day TEXT PRIMARY KEY,
-                    used INTEGER DEFAULT 0
-                )
-            """)
-            # Таблица кулдаунов
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS cooldown (
-                    user_id BIGINT PRIMARY KEY,
-                    last_ts BIGINT
-                )
-            """)
-        log.info("База данных Supabase подключена и таблицы созданы.")
+            await conn.execute("CREATE TABLE IF NOT EXISTS drops (id SERIAL PRIMARY KEY, user_id BIGINT, username TEXT, chat_id BIGINT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+            await conn.execute("CREATE TABLE IF NOT EXISTS gift_counter (day TEXT PRIMARY KEY, used INTEGER DEFAULT 0)")
+        log.info("База данных Supabase подключена.")
     except Exception as e:
         log.error(f"Ошибка подключения к БД: {e}")
 
 async def get_remaining_today() -> int:
-    if not db_pool: return 0
+    if not db_pool: return 50
     today = date.today().isoformat()
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT used FROM gift_counter WHERE day = $1", today)
@@ -83,70 +61,42 @@ async def inc_used_today():
     if not db_pool: return
     today = date.today().isoformat()
     async with db_pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO gift_counter (day, used) VALUES ($1, 1)
-            ON CONFLICT (day) DO UPDATE SET used = gift_counter.used + 1
-        """, today)
+        await conn.execute("INSERT INTO gift_counter (day, used) VALUES ($1, 1) ON CONFLICT (day) DO UPDATE SET used = gift_counter.used + 1", today)
 
 async def record_drop(user_id: int, username: str | None, chat_id: int):
     if not db_pool: return
     async with db_pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO drops (user_id, username, chat_id) VALUES ($1, $2, $3)
-        """, user_id, username, chat_id)
-
-async def check_and_set_cooldown(user_id: int) -> int:
-    if not db_pool: return 0
-    now = int(time.time())
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT last_ts FROM cooldown WHERE user_id = $1", user_id)
-        if row:
-            elapsed = now - row['last_ts']
-            if elapsed < COOLDOWN_SEC:
-                return COOLDOWN_SEC - elapsed
-        await conn.execute("""
-            INSERT INTO cooldown (user_id, last_ts) VALUES ($1, $2)
-            ON CONFLICT (user_id) DO UPDATE SET last_ts = $2
-        """, user_id, now)
-    return 0
+        await conn.execute("INSERT INTO drops (user_id, username, chat_id) VALUES ($1, $2, $3)", user_id, username, chat_id)
 
 # ---------- Логика сообщений ----------
 @dp.message(F.text)
 async def on_any_message(message: Message) -> None:
+    log.info(f"Получено сообщение от {message.from_user.id} в чате {message.chat.id} (тип: {message.chat.type})")
+
     if message.from_user.is_bot:
         return
 
+    # ЛИЧКА
     if message.chat.type == "private":
         if message.text.isdigit():
             amount = int(message.text)
             if amount < 1 or amount > 10000:
-                await message.answer("❌ Сумма должна быть от 1 до 10 000 звёзд.")
+                await message.answer("❌ Сумма от 1 до 10 000 звёзд.")
                 return
             try:
                 await bot.send_invoice(
-                    chat_id=message.from_user.id,
-                    title="Поддержка сардельки",
-                    description=f"Пожертвование на {amount} звёзд",
-                    payload=f"donate_{amount}",
-                    provider_token="",
-                    currency="XTR",
-                    prices=[LabeledPrice(label="Донат", amount=amount)]
+                    chat_id=message.from_user.id, title="Поддержка", description=f"Донат {amount} звёзд",
+                    payload=f"donate_{amount}", provider_token="", currency="XTR", prices=[LabeledPrice(label="Донат", amount=amount)]
                 )
             except Exception as e:
-                await message.answer(f"Ошибка при создании счета: {e}")
+                await message.answer(f"Ошибка: {e}")
             return
 
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⭐ Пожертвовать Stars", callback_data="donate_start")]
-        ])
-        await message.answer(
-            "Привет! Я личный бот сардельки для розыгрышей.\n\n"
-            "В группах я выдаю 🧟 Зомби Мишку с шансом 2%.",
-            reply_markup=kb
-        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⭐ Пожертвовать", callback_data="donate_start")]])
+        await message.answer("Привет! Я бот сардельки. В группах я выдаю 🧟 Зомби Мишку.", reply_markup=kb)
         return
 
-    # --- Группы ---
+    # ГРУППЫ
     remaining = await get_remaining_today()
     if remaining <= 0:
         return 
@@ -155,23 +105,15 @@ async def on_any_message(message: Message) -> None:
     if roll >= DROP_CHANCE:
         return 
 
-    wait = await check_and_set_cooldown(message.from_user.id)
-    if wait > 0:
-        return 
-
     try:
-        # Отправка подарка через сессию (так как в aiogram нет метода send_gift)
+        # Отправка подарка
         await message.bot.session.make_request(
             method="sendGift",
-            data={
-                "user_id": message.from_user.id,
-                "gift_id": GIFT_ID,
-                "text": f"Тебе выпал 🧟 Зомби Мишка! Шанс: {DROP_CHANCE}%"
-            }
+            data={"user_id": message.from_user.id, "gift_id": GIFT_ID, "text": "Тебе выпал 🧟 Зомби Мишка!"}
         )
     except Exception as e:
         log.error(f"Ошибка отправки подарка: {e}")
-        await message.reply(f"⚠️ Ошибка: не удалось выдать подарок.\n{e}")
+        await message.reply(f"⚠️ Ошибка подарка (баланс или gift_id):\n{e}")
         return
 
     await inc_used_today()
@@ -190,10 +132,7 @@ async def on_any_message(message: Message) -> None:
 # ---------- Донат ----------
 @dp.callback_query(F.data == "donate_start")
 async def process_donate_start(callback: CallbackQuery):
-    await callback.message.answer(
-        "Напиши, сколько звёзд ты хочешь пожертвовать (от 1 до 10 000):",
-        reply_markup=ForceReply(selective=True)
-    )
+    await callback.message.answer("Напиши, сколько звёзд ты хочешь пожертвовать (от 1 до 10000):", reply_markup=ForceReply(selective=True))
     await callback.answer()
 
 @dp.pre_checkout_query()
@@ -202,13 +141,15 @@ async def process_pre_checkout(query: PreCheckoutQuery):
 
 @dp.message(F.successful_payment)
 async def process_successful_payment(message: Message):
-    await message.answer("❤️ Спасибо за поддержку! Твои звёзды улетели сардельке.")
+    await message.answer("❤️ Спасибо за поддержку!")
 
-# ---------- Веб-сервер ----------
-async def health(request):
-    return web.Response(text="Bot is running!")
+# ---------- Веб-сервер и Запуск ----------
+async def health(request): return web.Response(text="Bot is running!")
 
-async def start_web_server():
+async def main() -> None:
+    await init_db()
+    
+    # Запуск веб-сервера для Render
     app = web.Application()
     app.router.add_get("/", health)
     runner = web.AppRunner(app)
@@ -217,13 +158,12 @@ async def start_web_server():
     await site.start()
     log.info(f"Web server started on port {PORT}")
 
-# ---------- Запуск ----------
-async def main() -> None:
-    await init_db()
-    await start_web_server()
+    # Удаляем старый вебхук, чтобы polling работал корректно
     await bot.delete_webhook(drop_pending_updates=True)
+    
     log.info("Starting polling...")
-    await dp.start_polling(bot)
+    # ВАЖНО: Разрешаем боту получать ВСЕ типы обновлений
+    await dp.start_polling(bot, allowed_updates=["message", "callback_query", "pre_checkout_query"])
 
 if __name__ == "__main__":
     asyncio.run(main())
