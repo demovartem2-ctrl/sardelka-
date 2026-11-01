@@ -11,21 +11,12 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.types import Message
-from aiohttp import web
 
 # ---------- Конфиг ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 API_BASE = os.getenv("API_BASE", "https://misugram.cloud-ip.cc")
-
-# Если WEBHOOK_BASE_URL не задан вручную, берем системную переменную Render
-WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL") or os.getenv("RENDER_EXTERNAL_URL", "")
-WEBHOOK_BASE_URL = WEBHOOK_BASE_URL.rstrip("/")
-
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change_me")
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "50"))
 COOLDOWN_SEC = int(os.getenv("COOLDOWN_SEC", "30"))
-USE_WEBHOOK = os.getenv("USE_WEBHOOK", "1") == "1"
-PORT = int(os.getenv("PORT", "8080"))
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 
 DROP_CHANCE = 0.5 
@@ -153,43 +144,16 @@ async def on_any_message(message: Message) -> None:
     )
     await message.reply(text, parse_mode="HTML")
 
-# ---------- Webhook / Polling ----------
-async def health(_: web.Request) -> web.Response:
-    return web.Response(text="ok")
-
+# ---------- Запуск (Polling) ----------
 async def main() -> None:
     await init_db()
-
-    if not USE_WEBHOOK:
-        log.info("Starting polling...")
-        await bot.delete_webhook(drop_pending_updates=True)
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-        return
-
-    if not WEBHOOK_BASE_URL:
-        raise RuntimeError("Нет ни WEBHOOK_BASE_URL, ни RENDER_EXTERNAL_URL. Проверь настройки Render.")
-
-    webhook_path = f"/webhook/{WEBHOOK_SECRET}"
-    full_url = f"{WEBHOOK_BASE_URL}{webhook_path}"
-
-    await bot.set_webhook(full_url, drop_pending_updates=True, allowed_updates=dp.resolve_used_update_types())
-    log.info("Webhook set to %s", full_url)
-
-    app = web.Application()
-    app.router.add_get("/", health)
-    app.router.add_post(webhook_path, dp.webhook_handler(bot))
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    log.info("Listening on 0.0.0.0:%s", PORT)
-
-    try:
-        await asyncio.Event().wait()
-    finally:
-        await runner.cleanup()
-        await session.close()
+    log.info("Starting polling...")
+    
+    # Удаляем вебхук, если он был, чтобы бот мог работать в режиме опроса
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    # Запускаем бота
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
