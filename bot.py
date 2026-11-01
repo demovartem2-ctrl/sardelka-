@@ -7,10 +7,9 @@ import time
 from datetime import date
 
 import aiosqlite
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
-from aiogram.filters import Command
 from aiogram.types import Message
 from aiohttp import web
 
@@ -25,7 +24,8 @@ USE_WEBHOOK = os.getenv("USE_WEBHOOK", "1") == "1"
 PORT = int(os.getenv("PORT", "8080"))
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 
-DROP_CHANCE = 1.0  # 1%
+# Шанс дропа (0.5%)
+DROP_CHANCE = 0.5 
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("nft-bot")
@@ -118,55 +118,47 @@ async def check_and_set_cooldown(user_id: int) -> int:
         await db.commit()
     return 0
 
-# ---------- Логика дропа ----------
-async def try_drop(message: Message, target) -> None:
-    # Кулдаун на вызывающего
-    wait = await check_and_set_cooldown(message.from_user.id)
-    if wait > 0:
-        await message.reply(f"⏳ Подожди ещё {wait} сек.")
+# ---------- Основная логика ----------
+@dp.message(F.text)  # Срабатывает на ЛЮБОЕ текстовое сообщение
+async def on_any_message(message: Message) -> None:
+    # Игнорируем сообщения от самого бота (на всякий случай)
+    if message.from_user.is_bot:
         return
 
+    # 1. Проверяем, не закончились ли подарки на сегодня (глобально)
     remaining = await get_remaining_today()
     if remaining <= 0:
-        await message.reply("🎁 Подарки на сегодня закончились. Возвращайтесь завтра!")
-        return
+        return  # Если лимит 50 исчерпан, бот молчит до завтра
 
+    # 2. Кидаем кубик (шанс 0.5%)
     roll = random.uniform(0, 100)
     if roll >= DROP_CHANCE:
-        await message.reply("😔 В этот раз не повезло. Попробуйте ещё!")
-        return
+        return  # Не повезло, бот молчит и ждет следующее сообщение
 
+    # 3. Если кубик выпал, проверяем кулдаун для этого юзера (чтобы не спамить)
+    wait = await check_and_set_cooldown(message.from_user.id)
+    if wait > 0:
+        return  # Юзеру недавно уже выпадало, пропускаем
+
+    # 4. Выдаем NFT!
     await inc_used_today()
-    await record_drop(target.id, target.username, message.chat.id)
+    await record_drop(message.from_user.id, message.from_user.username, message.chat.id)
+    
     remaining_after = await get_remaining_today()
+    safe_name = html.escape(message.from_user.full_name)
 
-    safe_name = html.escape(target.full_name)
+    # Красиво форматируем 0.5 (чтобы не выводило 0.50000001)
+    chance_str = f"{DROP_CHANCE:g}"
+
     text = (
-        f'<a href="tg://user?id={target.id}">{safe_name}</a> получает '
+        f'<a href="tg://user?id={message.from_user.id}">{safe_name}</a> получает '
         f"🧟 <b>Крутой NFT</b> от @sardelka!\n\n"
-        f"🎉 Шанс был: {int(DROP_CHANCE)}%\n"
+        f"🎉 Шанс был: {chance_str}%\n"
         f"🎁 Осталось подарков на сегодня: {remaining_after}"
     )
+    
+    # Отвечаем на сообщение юзера
     await message.reply(text, parse_mode="HTML")
-
-# ---------- Хендлеры ----------
-@dp.message(Command("drop"))
-async def cmd_drop(message: Message) -> None:
-    if not message.reply_to_message or not message.reply_to_message.from_user:
-        await message.reply(
-            "Ответьте командой /drop на сообщение пользователя, которому хотите подарить NFT."
-        )
-        return
-    await try_drop(message, message.reply_to_message.from_user)
-
-@dp.message(Command("dropme"))
-async def cmd_dropme(message: Message) -> None:
-    await try_drop(message, message.from_user)
-
-@dp.message(Command("gifts"))
-async def cmd_gifts(message: Message) -> None:
-    remaining = await get_remaining_today()
-    await message.reply(f"🎁 Осталось подарков на сегодня: {remaining}")
 
 # ---------- Webhook / Polling ----------
 async def health(_: web.Request) -> web.Response:
@@ -174,10 +166,11 @@ async def health(_: web.Request) -> web.Response:
 
 async def main() -> None:
     await init_db()
+    await bot.delete_webhook(drop_pending_updates=True) 
 
     if not USE_WEBHOOK:
         log.info("Starting polling...")
-        await dp.start_polling(bot)
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
         return
 
     if not WEBHOOK_BASE_URL:
