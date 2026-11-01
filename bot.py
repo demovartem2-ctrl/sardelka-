@@ -125,7 +125,7 @@ async def on_any_message(message: Message) -> None:
             user_id=message.from_user.id,
             gift_id=GIFT_ID,
             text="Тебе выпал 🧟 Зомби Мишка!"
-        ))
+        )
     except Exception as e:
         log.error(f"Ошибка отправки подарка: {e}")
         await message.reply(f"⚠️ Ошибка подарка (баланс или gift_id):\n{e}")
