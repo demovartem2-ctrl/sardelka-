@@ -16,7 +16,11 @@ from aiohttp import web
 # ---------- Конфиг ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 API_BASE = os.getenv("API_BASE", "https://misugram.cloud-ip.cc")
-WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").rstrip("/")
+
+# Если WEBHOOK_BASE_URL не задан вручную, берем системную переменную Render
+WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL") or os.getenv("RENDER_EXTERNAL_URL", "")
+WEBHOOK_BASE_URL = WEBHOOK_BASE_URL.rstrip("/")
+
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change_me")
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "50"))
 COOLDOWN_SEC = int(os.getenv("COOLDOWN_SEC", "30"))
@@ -24,7 +28,6 @@ USE_WEBHOOK = os.getenv("USE_WEBHOOK", "1") == "1"
 PORT = int(os.getenv("PORT", "8080"))
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 
-# Шанс дропа (0.5%)
 DROP_CHANCE = 0.5 
 
 logging.basicConfig(level=logging.INFO)
@@ -97,7 +100,6 @@ async def record_drop(user_id: int, username: str | None, chat_id: int) -> None:
         await db.commit()
 
 async def check_and_set_cooldown(user_id: int) -> int:
-    """Возвращает оставшиеся секунды кулдауна (0 — можно дропать)."""
     now = int(time.time())
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
@@ -118,36 +120,29 @@ async def check_and_set_cooldown(user_id: int) -> int:
         await db.commit()
     return 0
 
-# ---------- Основная логика ----------
-@dp.message(F.text)  # Срабатывает на ЛЮБОЕ текстовое сообщение
+# ---------- Логика ----------
+@dp.message(F.text)
 async def on_any_message(message: Message) -> None:
-    # Игнорируем сообщения от самого бота (на всякий случай)
     if message.from_user.is_bot:
         return
 
-    # 1. Проверяем, не закончились ли подарки на сегодня (глобально)
     remaining = await get_remaining_today()
     if remaining <= 0:
-        return  # Если лимит 50 исчерпан, бот молчит до завтра
+        return 
 
-    # 2. Кидаем кубик (шанс 0.5%)
     roll = random.uniform(0, 100)
     if roll >= DROP_CHANCE:
-        return  # Не повезло, бот молчит и ждет следующее сообщение
+        return 
 
-    # 3. Если кубик выпал, проверяем кулдаун для этого юзера (чтобы не спамить)
     wait = await check_and_set_cooldown(message.from_user.id)
     if wait > 0:
-        return  # Юзеру недавно уже выпадало, пропускаем
+        return 
 
-    # 4. Выдаем NFT!
     await inc_used_today()
     await record_drop(message.from_user.id, message.from_user.username, message.chat.id)
     
     remaining_after = await get_remaining_today()
     safe_name = html.escape(message.from_user.full_name)
-
-    # Красиво форматируем 0.5 (чтобы не выводило 0.50000001)
     chance_str = f"{DROP_CHANCE:g}"
 
     text = (
@@ -156,8 +151,6 @@ async def on_any_message(message: Message) -> None:
         f"🎉 Шанс был: {chance_str}%\n"
         f"🎁 Осталось подарков на сегодня: {remaining_after}"
     )
-    
-    # Отвечаем на сообщение юзера
     await message.reply(text, parse_mode="HTML")
 
 # ---------- Webhook / Polling ----------
@@ -166,20 +159,20 @@ async def health(_: web.Request) -> web.Response:
 
 async def main() -> None:
     await init_db()
-    await bot.delete_webhook(drop_pending_updates=True) 
 
     if not USE_WEBHOOK:
         log.info("Starting polling...")
+        await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
         return
 
     if not WEBHOOK_BASE_URL:
-        raise RuntimeError("WEBHOOK_BASE_URL пустой, а USE_WEBHOOK=1")
+        raise RuntimeError("Нет ни WEBHOOK_BASE_URL, ни RENDER_EXTERNAL_URL. Проверь настройки Render.")
 
     webhook_path = f"/webhook/{WEBHOOK_SECRET}"
     full_url = f"{WEBHOOK_BASE_URL}{webhook_path}"
 
-    await bot.set_webhook(full_url, allowed_updates=dp.resolve_used_update_types())
+    await bot.set_webhook(full_url, drop_pending_updates=True, allowed_updates=dp.resolve_used_update_types())
     log.info("Webhook set to %s", full_url)
 
     app = web.Application()
@@ -196,7 +189,6 @@ async def main() -> None:
         await asyncio.Event().wait()
     finally:
         await runner.cleanup()
-        await bot.delete_webhook()
         await session.close()
 
 if __name__ == "__main__":
