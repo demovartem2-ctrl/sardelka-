@@ -1,11 +1,13 @@
 import asyncio
+import html
 import logging
 import os
 import random
+import time
 from datetime import date
 
 import aiosqlite
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.filters import Command
@@ -17,17 +19,17 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 API_BASE = os.getenv("API_BASE", "https://misugram.cloud-ip.cc")
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").rstrip("/")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change_me")
-DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "96"))
+DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "50"))
+COOLDOWN_SEC = int(os.getenv("COOLDOWN_SEC", "30"))
 USE_WEBHOOK = os.getenv("USE_WEBHOOK", "1") == "1"
 PORT = int(os.getenv("PORT", "8080"))
-
 DB_PATH = os.getenv("DB_PATH", "bot.db")
-DROP_CHANCE = 1.0  # 1% шанс
+
+DROP_CHANCE = 1.0  # 1%
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("nft-bot")
 
-# ---------- Бот через ваш шлюз ----------
 session = AiohttpSession(api=TelegramAPIServer.from_base(API_BASE))
 bot = Bot(token=BOT_TOKEN, session=session)
 dp = Dispatcher()
@@ -51,6 +53,14 @@ async def init_db() -> None:
             CREATE TABLE IF NOT EXISTS gift_counter (
                 day TEXT PRIMARY KEY,
                 used INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cooldown (
+                user_id INTEGER PRIMARY KEY,
+                last_ts INTEGER NOT NULL
             )
             """
         )
@@ -86,11 +96,36 @@ async def record_drop(user_id: int, username: str | None, chat_id: int) -> None:
         )
         await db.commit()
 
+async def check_and_set_cooldown(user_id: int) -> int:
+    """Возвращает оставшиеся секунды кулдауна (0 — можно дропать)."""
+    now = int(time.time())
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT last_ts FROM cooldown WHERE user_id = ?", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if row:
+            elapsed = now - row[0]
+            if elapsed < COOLDOWN_SEC:
+                return COOLDOWN_SEC - elapsed
+        await db.execute(
+            """
+            INSERT INTO cooldown (user_id, last_ts) VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET last_ts = excluded.last_ts
+            """,
+            (user_id, now),
+        )
+        await db.commit()
+    return 0
+
 # ---------- Логика дропа ----------
 async def try_drop(message: Message, target) -> None:
-    """
-    target — объект User (получатель подарка), message — контекст (команда/reply).
-    """
+    # Кулдаун на вызывающего
+    wait = await check_and_set_cooldown(message.from_user.id)
+    if wait > 0:
+        await message.reply(f"⏳ Подожди ещё {wait} сек.")
+        return
+
     remaining = await get_remaining_today()
     if remaining <= 0:
         await message.reply("🎁 Подарки на сегодня закончились. Возвращайтесь завтра!")
@@ -101,14 +136,13 @@ async def try_drop(message: Message, target) -> None:
         await message.reply("😔 В этот раз не повезло. Попробуйте ещё!")
         return
 
-    # Выиграл
     await inc_used_today()
     await record_drop(target.id, target.username, message.chat.id)
-
     remaining_after = await get_remaining_today()
 
+    safe_name = html.escape(target.full_name)
     text = (
-        f"<a href=\"tg://user?id={target.id}\">{target.full_name}</a> получает "
+        f'<a href="tg://user?id={target.id}">{safe_name}</a> получает '
         f"🧟 <b>Крутой NFT</b> от @sardelka!\n\n"
         f"🎉 Шанс был: {int(DROP_CHANCE)}%\n"
         f"🎁 Осталось подарков на сегодня: {remaining_after}"
@@ -118,7 +152,6 @@ async def try_drop(message: Message, target) -> None:
 # ---------- Хендлеры ----------
 @dp.message(Command("drop"))
 async def cmd_drop(message: Message) -> None:
-    """Reply на сообщение пользователя: /drop — дроп ему."""
     if not message.reply_to_message or not message.reply_to_message.from_user:
         await message.reply(
             "Ответьте командой /drop на сообщение пользователя, которому хотите подарить NFT."
@@ -128,11 +161,15 @@ async def cmd_drop(message: Message) -> None:
 
 @dp.message(Command("dropme"))
 async def cmd_dropme(message: Message) -> None:
-    """Для теста: /dropme — дроп себе."""
     await try_drop(message, message.from_user)
 
+@dp.message(Command("gifts"))
+async def cmd_gifts(message: Message) -> None:
+    remaining = await get_remaining_today()
+    await message.reply(f"🎁 Осталось подарков на сегодня: {remaining}")
+
 # ---------- Webhook / Polling ----------
-async def health(request: web.Request) -> web.Response:
+async def health(_: web.Request) -> web.Response:
     return web.Response(text="ok")
 
 async def main() -> None:
