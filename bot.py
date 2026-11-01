@@ -22,7 +22,7 @@ COOLDOWN_SEC = int(os.getenv("COOLDOWN_SEC", "30"))
 DATABASE_URL = os.getenv("DATABASE_URL") 
 PORT = int(os.getenv("PORT", "8080"))
 
-DROP_CHANCE = 2.0
+DROP_CHANCE = 100.0
 GIFT_ID = "9000000000000200"
 
 logging.basicConfig(level=logging.INFO)
