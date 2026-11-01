@@ -10,7 +10,6 @@ import asyncpg
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
-from aiogram.methods import SendGift
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery, CallbackQuery, ForceReply
 from aiohttp import web
 
@@ -22,8 +21,8 @@ PORT = int(os.getenv("PORT", "8080"))
 
 DAILY_LIMIT = 50
 COOLDOWN_SEC = 30
-DROP_CHANCE = 3.0  # Твой шанс 3%
-GIFT_ID = "9000000000000200"  # ID мишки
+DROP_CHANCE = 3.0  # Шанс 3%
+GIFT_ID = "9000000000000200" 
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("nft-bot")
@@ -119,9 +118,9 @@ async def on_any_message(message: Message) -> None:
     if wait > 0:
         return 
 
-    # ОТПРАВКА ПОДАРКА (через официальный метод aiogram)
+    # ОТПРАВКА ПОДАРКА
     try:
-        await bot(SendGift(
+        await bot.send_gift(
             user_id=message.from_user.id,
             gift_id=GIFT_ID,
             text="Тебе выпал 🧟 Зомби Мишка!"
