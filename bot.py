@@ -21,7 +21,7 @@ COOLDOWN_SEC = int(os.getenv("COOLDOWN_SEC", "30"))
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 PORT = int(os.getenv("PORT", "8080"))
 
-DROP_CHANCE = 0.5 
+DROP_CHANCE = 2.0  # Теперь 2%
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("nft-bot")
@@ -163,10 +163,7 @@ async def start_web_server():
 async def main() -> None:
     await init_db()
     
-    # Запускаем веб-сервер в фоне (чтобы Render видел открытый порт)
     await start_web_server()
-    
-    # Удаляем вебхук, если он был (чтобы polling работал)
     await bot.delete_webhook(drop_pending_updates=True)
     
     log.info("Starting polling...")
