@@ -21,7 +21,7 @@ COOLDOWN_SEC = int(os.getenv("COOLDOWN_SEC", "30"))
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 PORT = int(os.getenv("PORT", "8080"))
 
-DROP_CHANCE = 2.0  # Теперь 2%
+DROP_CHANCE = 2.0  # 2%
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("nft-bot")
@@ -116,8 +116,16 @@ async def check_and_set_cooldown(user_id: int) -> int:
 # ---------- Логика ----------
 @dp.message(F.text)
 async def on_any_message(message: Message) -> None:
+    # 1. Игнорируем сообщения от самого бота
     if message.from_user.is_bot:
         return
+
+    # 2. Если это ЛИЧКА (private) — отвечаем приветствием и выходим
+    if message.chat.type == "private":
+        await message.answer("Привет! Я личный бот сардельки для розыгрышей.")
+        return
+
+    # --- Дальше логика только для ГРУПП ---
 
     remaining = await get_remaining_today()
     if remaining <= 0:
