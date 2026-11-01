@@ -22,7 +22,6 @@ PORT = int(os.getenv("PORT", "8080"))
 DAILY_LIMIT = 50
 COOLDOWN_SEC = 30
 DROP_CHANCE = 3.0  # Шанс 3%
-GIFT_ID = "9000000000000200" 
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("nft-bot")
@@ -102,7 +101,7 @@ async def on_any_message(message: Message) -> None:
             return
 
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⭐ Пожертвовать", callback_data="donate_start")]])
-        await message.answer("Привет! Я бот сардельки. В группах я выдаю 🧟 Зомби Мишку с шансом 3%.", reply_markup=kb)
+        await message.answer("Привет! Я бот сардельки. В группах я пишу, кому выпал 🧟 Зомби Мишка с шансом 3%.", reply_markup=kb)
         return
 
     # ГРУППЫ
@@ -118,26 +117,15 @@ async def on_any_message(message: Message) -> None:
     if wait > 0:
         return 
 
-    # ОТПРАВКА ПОДАРКА
-    try:
-        await bot.send_gift(
-            user_id=message.from_user.id,
-            gift_id=GIFT_ID,
-            text="Тебе выпал 🧟 Зомби Мишка!"
-        )
-    except Exception as e:
-        log.error(f"Ошибка отправки подарка: {e}")
-        await message.reply(f"⚠️ Ошибка подарка (баланс или gift_id):\n{e}")
-        return
-
     await inc_used_today()
     await record_drop(message.from_user.id, message.from_user.username, message.chat.id)
     remaining_after = await get_remaining_today()
     safe_name = html.escape(message.from_user.full_name)
 
+    # ТЕКСТ ОТ ТВОЕГО ЛИЦА
     text = (
         f'<a href="tg://user?id={message.from_user.id}">{safe_name}</a> получает '
-        f"🧟 <b>Зомби Мишку</b> от @sardelka!\n\n"
+        f"🧟 <b>Зомби Мишку</b> от <b>сардельки</b>!\n\n"
         f"🎉 Шанс был: {DROP_CHANCE:g}%\n"
         f"🎁 Осталось подарков на сегодня: {remaining_after}"
     )
