@@ -10,6 +10,7 @@ import asyncpg
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
+from aiogram.methods import SendGift
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery, CallbackQuery, ForceReply
 from aiohttp import web
 
@@ -20,11 +21,9 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 PORT = int(os.getenv("PORT", "8080"))
 
 DAILY_LIMIT = 50
-COOLDOWN_SEC = 0 # Временно убрал кулдаун, чтобы можно было спамить для теста
-DROP_CHANCE = 100.0 # Временно 100%, чтобы точно проверить
-
-# ВАЖНО: Замени этот ID на реальный ID мишки (если 9000000000000200 не работает)
-GIFT_ID = "9000000000000200" 
+COOLDOWN_SEC = 30
+DROP_CHANCE = 3.0  # Твой шанс 3%
+GIFT_ID = "9000000000000200"  # ID мишки
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("nft-bot")
@@ -45,6 +44,7 @@ async def init_db():
         async with db_pool.acquire() as conn:
             await conn.execute("CREATE TABLE IF NOT EXISTS drops (id SERIAL PRIMARY KEY, user_id BIGINT, username TEXT, chat_id BIGINT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
             await conn.execute("CREATE TABLE IF NOT EXISTS gift_counter (day TEXT PRIMARY KEY, used INTEGER DEFAULT 0)")
+            await conn.execute("CREATE TABLE IF NOT EXISTS cooldown (user_id BIGINT PRIMARY KEY, last_ts BIGINT)")
         log.info("База данных Supabase подключена.")
     except Exception as e:
         log.error(f"Ошибка подключения к БД: {e}")
@@ -68,11 +68,21 @@ async def record_drop(user_id: int, username: str | None, chat_id: int):
     async with db_pool.acquire() as conn:
         await conn.execute("INSERT INTO drops (user_id, username, chat_id) VALUES ($1, $2, $3)", user_id, username, chat_id)
 
+async def check_and_set_cooldown(user_id: int) -> int:
+    if not db_pool: return 0
+    now = int(time.time())
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT last_ts FROM cooldown WHERE user_id = $1", user_id)
+        if row:
+            elapsed = now - row['last_ts']
+            if elapsed < COOLDOWN_SEC:
+                return COOLDOWN_SEC - elapsed
+        await conn.execute("INSERT INTO cooldown (user_id, last_ts) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET last_ts = $2", user_id, now)
+    return 0
+
 # ---------- Логика сообщений ----------
 @dp.message(F.text)
 async def on_any_message(message: Message) -> None:
-    log.info(f"Получено сообщение от {message.from_user.id} в чате {message.chat.id} (тип: {message.chat.type})")
-
     if message.from_user.is_bot:
         return
 
@@ -93,7 +103,7 @@ async def on_any_message(message: Message) -> None:
             return
 
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⭐ Пожертвовать", callback_data="donate_start")]])
-        await message.answer("Привет! Я бот сардельки. В группах я выдаю 🧟 Зомби Мишку.", reply_markup=kb)
+        await message.answer("Привет! Я бот сардельки. В группах я выдаю 🧟 Зомби Мишку с шансом 3%.", reply_markup=kb)
         return
 
     # ГРУППЫ
@@ -105,12 +115,17 @@ async def on_any_message(message: Message) -> None:
     if roll >= DROP_CHANCE:
         return 
 
+    wait = await check_and_set_cooldown(message.from_user.id)
+    if wait > 0:
+        return 
+
+    # ОТПРАВКА ПОДАРКА (через официальный метод aiogram)
     try:
-        # Отправка подарка
-        await message.bot.session.make_request(
-            method="sendGift",
-            data={"user_id": message.from_user.id, "gift_id": GIFT_ID, "text": "Тебе выпал 🧟 Зомби Мишка!"}
-        )
+        await bot(SendGift(
+            user_id=message.from_user.id,
+            gift_id=GIFT_ID,
+            text="Тебе выпал 🧟 Зомби Мишка!"
+        ))
     except Exception as e:
         log.error(f"Ошибка отправки подарка: {e}")
         await message.reply(f"⚠️ Ошибка подарка (баланс или gift_id):\n{e}")
@@ -143,13 +158,12 @@ async def process_pre_checkout(query: PreCheckoutQuery):
 async def process_successful_payment(message: Message):
     await message.answer("❤️ Спасибо за поддержку!")
 
-# ---------- Веб-сервер и Запуск ----------
+# ---------- Запуск ----------
 async def health(request): return web.Response(text="Bot is running!")
 
 async def main() -> None:
     await init_db()
     
-    # Запуск веб-сервера для Render
     app = web.Application()
     app.router.add_get("/", health)
     runner = web.AppRunner(app)
@@ -158,11 +172,8 @@ async def main() -> None:
     await site.start()
     log.info(f"Web server started on port {PORT}")
 
-    # Удаляем старый вебхук, чтобы polling работал корректно
     await bot.delete_webhook(drop_pending_updates=True)
-    
     log.info("Starting polling...")
-    # ВАЖНО: Разрешаем боту получать ВСЕ типы обновлений
     await dp.start_polling(bot, allowed_updates=["message", "callback_query", "pre_checkout_query"])
 
 if __name__ == "__main__":
