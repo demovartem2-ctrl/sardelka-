@@ -20,8 +20,8 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 PORT = int(os.getenv("PORT", "8080"))
 
 DAILY_LIMIT = 50
-COOLDOWN_SEC = 30
-DROP_CHANCE = 3.0  # Шанс 3%
+COOLDOWN_SEC = 60  # Жесткий кулдаун 60 секунд на юзера
+DROP_CHANCE = 3.0
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("nft-bot")
@@ -35,7 +35,6 @@ db_pool = None
 async def init_db():
     global db_pool
     if not DATABASE_URL:
-        log.error("DATABASE_URL не задан!")
         return
     try:
         db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
@@ -66,16 +65,26 @@ async def record_drop(user_id: int, username: str | None, chat_id: int):
     async with db_pool.acquire() as conn:
         await conn.execute("INSERT INTO drops (user_id, username, chat_id) VALUES ($1, $2, $3)", user_id, username, chat_id)
 
+# УЛУЧШЕННЫЙ КУЛДАУН
 async def check_and_set_cooldown(user_id: int) -> int:
     if not db_pool: return 0
     now = int(time.time())
     async with db_pool.acquire() as conn:
+        # 1. Получаем последнее время
         row = await conn.fetchrow("SELECT last_ts FROM cooldown WHERE user_id = $1", user_id)
+        
         if row:
             elapsed = now - row['last_ts']
             if elapsed < COOLDOWN_SEC:
+                log.info(f"[КД] Юзер {user_id} в кулдауне. Осталось {COOLDOWN_SEC - elapsed} сек.")
                 return COOLDOWN_SEC - elapsed
-        await conn.execute("INSERT INTO cooldown (user_id, last_ts) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET last_ts = $2", user_id, now)
+        
+        # 2. Если кулдаун прошел (или его не было) — обновляем время
+        await conn.execute("""
+            INSERT INTO cooldown (user_id, last_ts) VALUES ($1, $2) 
+            ON CONFLICT (user_id) DO UPDATE SET last_ts = $2
+        """, user_id, now)
+        log.info(f"[КД] Юзеру {user_id} разрешен подарок. Обновлено время на {now}.")
     return 0
 
 # ---------- Логика сообщений ----------
@@ -113,16 +122,17 @@ async def on_any_message(message: Message) -> None:
     if roll >= DROP_CHANCE:
         return 
 
+    # Проверяем кулдаун. Если вернет > 0, значит юзер недавно получал.
     wait = await check_and_set_cooldown(message.from_user.id)
     if wait > 0:
         return 
 
+    # Выдаем
     await inc_used_today()
     await record_drop(message.from_user.id, message.from_user.username, message.chat.id)
     remaining_after = await get_remaining_today()
     safe_name = html.escape(message.from_user.full_name)
 
-    # ТЕКСТ ОТ ТВОЕГО ЛИЦА
     text = (
         f'<a href="tg://user?id={message.from_user.id}">{safe_name}</a> получает '
         f"🧟 <b>Зомби Мишку</b> от <b>сардельки</b>!\n\n"
