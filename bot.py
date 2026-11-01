@@ -16,13 +16,12 @@ from aiohttp import web
 # ---------- Конфиг ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 API_BASE = os.getenv("API_BASE", "https://misugram.cloud-ip.cc")
-# В Render эта переменная должна быть:
-# postgresql://postgres.hxjfjciwegknieqvxjlt:sardelkasarde@aws-0-eu-west-1.pooler.supabase.com:6543/postgres?pgbouncer=true
 DATABASE_URL = os.getenv("DATABASE_URL")
 PORT = int(os.getenv("PORT", "8080"))
 
 DAILY_LIMIT = 50
-COOLDOWN_SEC = 60  # Жесткий кулдаун 60 секунд
+# Глобальный кулдаун: 15 часов (15 * 60 * 60 = 54000 секунд)
+GLOBAL_COOLDOWN = 54000
 DROP_CHANCE = 3.0
 
 logging.basicConfig(level=logging.INFO)
@@ -42,43 +41,52 @@ async def init_db():
     try:
         db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
         async with db_pool.acquire() as conn:
+            # Таблица истории подарков
             await conn.execute("CREATE TABLE IF NOT EXISTS drops (id SERIAL PRIMARY KEY, user_id BIGINT, username TEXT, chat_id BIGINT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
-            await conn.execute("CREATE TABLE IF NOT EXISTS gift_counter (day TEXT PRIMARY KEY, used INTEGER DEFAULT 0)")
-            await conn.execute("CREATE TABLE IF NOT EXISTS cooldown (user_id BIGINT PRIMARY KEY, last_ts BIGINT)")
+            # Таблица для глобального счетчика и времени последнего сброса
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS global_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    used_today INTEGER DEFAULT 0,
+                    last_reset_ts BIGINT DEFAULT 0
+                )
+            """)
+            # Создаем единственную запись, если ее нет
+            await conn.execute("INSERT INTO global_state (id, used_today, last_reset_ts) VALUES (1, 0, 0) ON CONFLICT DO NOTHING")
         log.info("База данных Supabase подключена.")
     except Exception as e:
         log.error(f"Ошибка подключения к БД: {e}")
 
-async def get_remaining_today() -> int:
-    if not db_pool: return 50
-    today = date.today().isoformat()
+async def check_global_status() -> tuple[int, int]:
+    """Возвращает (осталось, секунд до сброса). Если осталось > 0, можно выдавать."""
+    if not db_pool: return 0, 0
+    now = int(time.time())
+    
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT used FROM gift_counter WHERE day = $1", today)
-        used = row['used'] if row else 0
-    return max(DAILY_LIMIT - used, 0)
+        row = await conn.fetchrow("SELECT used_today, last_reset_ts FROM global_state WHERE id = 1")
+        used = row['used_today']
+        last_reset = row['last_reset_ts']
 
-async def inc_used_today():
+        # Если прошло 15 часов с момента последнего сброса — сбрасываем счетчик
+        if now - last_reset >= GLOBAL_COOLDOWN:
+            await conn.execute("UPDATE global_state SET used_today = 0, last_reset_ts = $1 WHERE id = 1", now)
+            used = 0
+            last_reset = now
+            
+        remaining = max(DAILY_LIMIT - used, 0)
+        time_to_reset = max(GLOBAL_COOLDOWN - (now - last_reset), 0)
+        
+        return remaining, time_to_reset
+
+async def inc_global_used():
     if not db_pool: return
-    today = date.today().isoformat()
     async with db_pool.acquire() as conn:
-        await conn.execute("INSERT INTO gift_counter (day, used) VALUES ($1, 1) ON CONFLICT (day) DO UPDATE SET used = gift_counter.used + 1", today)
+        await conn.execute("UPDATE global_state SET used_today = used_today + 1 WHERE id = 1")
 
 async def record_drop(user_id: int, username: str | None, chat_id: int):
     if not db_pool: return
     async with db_pool.acquire() as conn:
         await conn.execute("INSERT INTO drops (user_id, username, chat_id) VALUES ($1, $2, $3)", user_id, username, chat_id)
-
-async def check_and_set_cooldown(user_id: int) -> int:
-    if not db_pool: return 0
-    now = int(time.time())
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT last_ts FROM cooldown WHERE user_id = $1", user_id)
-        if row:
-            elapsed = now - row['last_ts']
-            if elapsed < COOLDOWN_SEC:
-                return COOLDOWN_SEC - elapsed
-        await conn.execute("INSERT INTO cooldown (user_id, last_ts) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET last_ts = $2", user_id, now)
-    return 0
 
 # ---------- Логика сообщений ----------
 @dp.message(F.text)
@@ -86,7 +94,7 @@ async def on_any_message(message: Message) -> None:
     if message.from_user.is_bot:
         return
 
-    # ЛИЧКА
+    # ЛИЧКА (Всегда отвечает)
     if message.chat.type == "private":
         if message.text.isdigit():
             amount = int(message.text)
@@ -103,28 +111,26 @@ async def on_any_message(message: Message) -> None:
             return
 
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⭐ Пожертвовать", callback_data="donate_start")]])
-        await message.answer("Привет! Я бот сардельки. В группах я пишу, кому выпал 🧟 Зомби Мишка с шансом 3%.", reply_markup=kb)
+        await message.answer("Привет! Я бот сардельки. В группах я выдаю 🧟 Зомби Мишку с шансом 3%.", reply_markup=kb)
         return
 
     # ГРУППЫ
-    remaining = await get_remaining_today()
+    remaining, time_to_reset = await check_global_status()
     if remaining <= 0:
-        return 
+        return # Если глобальный лимит исчерпан, бот молчит
 
     roll = random.uniform(0, 100)
     if roll >= DROP_CHANCE:
         return 
 
-    wait = await check_and_set_cooldown(message.from_user.id)
-    if wait > 0:
-        return 
-
-    await inc_used_today()
+    # Выдаем подарок
+    await inc_global_used()
     await record_drop(message.from_user.id, message.from_user.username, message.chat.id)
-    remaining_after = await get_remaining_today()
+    
+    # Получаем обновленные данные
+    remaining_after, _ = await check_global_status()
     safe_name = html.escape(message.from_user.full_name)
 
-    # ТЕКСТ ОТ @sardelka
     text = (
         f'<a href="tg://user?id={message.from_user.id}">{safe_name}</a> получает '
         f"🧟 <b>Зомби Мишку</b> от @sardelka!\n\n"
