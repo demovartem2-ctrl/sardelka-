@@ -18,10 +18,10 @@ API_BASE = os.getenv("API_BASE", "https://misugram.cloud-ip.cc")
 DATABASE_URL = os.getenv("DATABASE_URL") 
 PORT = int(os.getenv("PORT", "8080"))
 
-MAX_DONATE = 1000000          # Лимит доната
-DROP_CHANCE = 3.0             # Шанс выдачи 3%
-GLOBAL_COOLDOWN = 30          # Глобальный кулдаун (30 секунд)
-DAILY_LIMIT = 25              # Всего подарков
+MAX_DONATE = 1000000
+DROP_CHANCE = 100.0  # ВРЕМЕННО 100% ДЛЯ ТЕСТА
+GLOBAL_COOLDOWN = 0  # ВРЕМЕННО 0 СЕКУНД
+DAILY_LIMIT = 1000   # ВРЕМЕННО 1000 ЛИМИТ
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("nft-bot")
@@ -35,7 +35,7 @@ db_pool = None
 async def init_db():
     global db_pool
     if not DATABASE_URL: 
-        log.warning("DATABASE_URL не задан. Лимиты не будут сохраняться в БД!")
+        log.error("DATABASE_URL не задан!")
         return
     try:
         db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5, statement_cache_size=0)
@@ -56,8 +56,7 @@ async def init_db():
 async def check_status() -> tuple[int, int]:
     if not db_pool: return DAILY_LIMIT, 0
     now = int(time.time())
-    COOLDOWN_RESET = 54000 # 15 часов
-    
+    COOLDOWN_RESET = 54000 
     try:
         async with db_pool.acquire() as conn:
             row = await conn.fetchrow("SELECT used_today, last_reset_ts, last_gift_ts FROM gift_state WHERE id = 1")
@@ -74,7 +73,9 @@ async def check_status() -> tuple[int, int]:
             wait_time = max(GLOBAL_COOLDOWN - time_since_last, 0)
 
             return remaining, wait_time
-    except: return 0, 0
+    except Exception as e:
+        log.error(f"Ошибка проверки статуса: {e}")
+        return 0, 0
 
 async def inc_gift_used():
     if not db_pool: return
@@ -87,9 +88,12 @@ async def inc_gift_used():
 # ---------- Логика ----------
 @dp.message(F.text)
 async def on_any_message(message: Message) -> None:
+    # ЛОГ: СРАЗУ ПИШЕМ В КОНСОЛЬ, ЧТО БОТ УВИДЕЛ СООБЩЕНИЕ
+    log.info(f"Получено сообщение от {message.from_user.id} в чате {message.chat.id} (тип: {message.chat.type})")
+
     if message.from_user.is_bot: return
 
-    # --- ЛИЧКА (Донат) ---
+    # --- ЛИЧКА ---
     if message.chat.type == "private":
         if message.text.isdigit():
             amount = int(message.text)
@@ -106,25 +110,37 @@ async def on_any_message(message: Message) -> None:
             return
 
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⭐ Пожертвовать", callback_data="donate_start")]])
-        await message.answer(f"Привет! Я бот для розыгрышей. В группах я выдаю Крутой NFT с шансом {DROP_CHANCE}%.", reply_markup=kb)
+        await message.answer(f"Привет! Я бот. В группах я выдаю Крутой NFT.", reply_markup=kb)
         return
 
-    # --- ГРУППЫ (Логика розыгрыша) ---
+    # --- ГРУППЫ ---
     remaining, wait_time = await check_status()
-    if remaining <= 0: return
-    if wait_time > 0: return
-    if random.uniform(0, 100) >= DROP_CHANCE: return
+    
+    if remaining <= 0: 
+        log.info("Подарки закончились")
+        return
+    if wait_time > 0: 
+        log.info(f"Кулдаун: {wait_time} сек")
+        return
+    if random.uniform(0, 100) >= DROP_CHANCE: 
+        log.info("Шанс не выпал")
+        return
 
-    # Выдаем ТЕКСТОМ (без реальной отправки гифта)
+    # Выдаем
     await inc_gift_used()
     safe_name = html.escape(message.from_user.full_name)
     
-    await message.reply(
+    text = (
         f'<a href="tg://user?id={message.from_user.id}">{safe_name}</a>, поздравляю, ты выиграл <b>Крутой NFT</b> от @sardelka.\n'
         f"Напиши ему, чтобы он тебе его выдал.\n\n"
-        f"🎉 Шанс был: {DROP_CHANCE}%",
-        parse_mode="HTML"
+        f"🎉 Шанс был: {DROP_CHANCE:g}%"
     )
+    
+    try:
+        await message.reply(text, parse_mode="HTML")
+        log.info(f"УСПЕХ! Отправлено сообщение в чат {message.chat.id}")
+    except Exception as e:
+        log.error(f"ОШИБКА ОТПРАВКИ СООБЩЕНИЯ: {e}")
 
 # ---------- Донат ----------
 @dp.callback_query(F.data == "donate_start")
