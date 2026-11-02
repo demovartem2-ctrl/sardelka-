@@ -18,12 +18,13 @@ API_BASE = os.getenv("API_BASE", "https://misugram.cloud-ip.cc")
 DATABASE_URL = os.getenv("DATABASE_URL") 
 PORT = int(os.getenv("PORT", "8080"))
 
-GIFT_ID = "9000000000000158"  # ID подарка (Зомби Мишка)
-MAX_DONATE = 1000000          # Лимит доната (1 миллион звезд)
+MAX_DONATE = 1000000          # Лимит доната
 DROP_CHANCE = 3.0             # Шанс выдачи 3%
+GLOBAL_COOLDOWN = 30          # Глобальный кулдаун (30 секунд)
+DAILY_LIMIT = 25              # Всего подарков
 
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("gift-bot")
+log = logging.getLogger("nft-bot")
 
 session = AiohttpSession(api=TelegramAPIServer.from_base(API_BASE))
 bot = Bot(token=BOT_TOKEN, session=session)
@@ -39,33 +40,48 @@ async def init_db():
     try:
         db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5, statement_cache_size=0)
         async with db_pool.acquire() as conn:
-            await conn.execute("CREATE TABLE IF NOT EXISTS gift_state (id INTEGER PRIMARY KEY CHECK (id = 1), used_today INTEGER DEFAULT 0, last_reset_ts BIGINT DEFAULT 0)")
-            await conn.execute("INSERT INTO gift_state (id, used_today, last_reset_ts) VALUES (1, 0, 0) ON CONFLICT DO NOTHING")
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS gift_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1), 
+                    used_today INTEGER DEFAULT 0, 
+                    last_reset_ts BIGINT DEFAULT 0,
+                    last_gift_ts BIGINT DEFAULT 0
+                )
+            """)
+            await conn.execute("INSERT INTO gift_state (id, used_today, last_reset_ts, last_gift_ts) VALUES (1, 0, 0, 0) ON CONFLICT DO NOTHING")
         log.info("База данных подключена.")
     except Exception as e:
         log.error(f"Ошибка БД: {e}")
 
-async def check_gift_status() -> int:
-    if not db_pool: return 100  
+async def check_status() -> tuple[int, int]:
+    if not db_pool: return DAILY_LIMIT, 0
     now = int(time.time())
-    GLOBAL_COOLDOWN = 54000 # 15 часов
-    DAILY_LIMIT = 100       # <--- ТУТ ИЗМЕНЕНО НА 100
+    COOLDOWN_RESET = 54000 # 15 часов
+    
     try:
         async with db_pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT used_today, last_reset_ts FROM gift_state WHERE id = 1")
+            row = await conn.fetchrow("SELECT used_today, last_reset_ts, last_gift_ts FROM gift_state WHERE id = 1")
             used = row['used_today']
             last_reset = row['last_reset_ts']
-            if now - last_reset >= GLOBAL_COOLDOWN:
+            last_gift = row['last_gift_ts']
+
+            if now - last_reset >= COOLDOWN_RESET:
                 await conn.execute("UPDATE gift_state SET used_today = 0, last_reset_ts = $1 WHERE id = 1", now)
                 used = 0
-            return max(DAILY_LIMIT - used, 0)
-    except: return 0
+            
+            remaining = max(DAILY_LIMIT - used, 0)
+            time_since_last = now - last_gift
+            wait_time = max(GLOBAL_COOLDOWN - time_since_last, 0)
+
+            return remaining, wait_time
+    except: return 0, 0
 
 async def inc_gift_used():
     if not db_pool: return
+    now = int(time.time())
     try:
         async with db_pool.acquire() as conn:
-            await conn.execute("UPDATE gift_state SET used_today = used_today + 1 WHERE id = 1")
+            await conn.execute("UPDATE gift_state SET used_today = used_today + 1, last_gift_ts = $1 WHERE id = 1", now)
     except: pass
 
 # ---------- Логика ----------
@@ -86,38 +102,26 @@ async def on_any_message(message: Message) -> None:
                     payload=f"donate_{amount}", provider_token="", currency="XTR", prices=[LabeledPrice(label="Донат", amount=amount)]
                 )
             except Exception as e:
-                await message.answer(f"Ошибка от Telegram (возможно, сумма слишком большая для одного платежа):\n{e}")
+                await message.answer(f"Ошибка от Telegram:\n{e}")
             return
 
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⭐ Пожертвовать", callback_data="donate_start")]])
-        await message.answer(f"Привет! Я бот для выдачи подарков. В группах я выдаю подарок с шансом {DROP_CHANCE}%.", reply_markup=kb)
+        await message.answer(f"Привет! Я бот для розыгрышей. В группах я выдаю Крутой NFT с шансом {DROP_CHANCE}%.", reply_markup=kb)
         return
 
-    # --- ГРУППЫ (Выдача подарка) ---
-    remaining = await check_gift_status()
+    # --- ГРУППЫ (Логика розыгрыша) ---
+    remaining, wait_time = await check_status()
     if remaining <= 0: return
-
+    if wait_time > 0: return
     if random.uniform(0, 100) >= DROP_CHANCE: return
 
-    # Пытаемся отправить реальный подарок от бота
-    try:
-        await bot.send_gift(
-            user_id=message.from_user.id,
-            gift_id=GIFT_ID,
-            text="Тебе выпал подарок от бота!"
-        )
-    except Exception as e:
-        log.error(f"Ошибка отправки подарка: {e}")
-        await message.reply(f"⚠️ Ошибка выдачи подарка (проверь баланс бота или gift_id):\n{e}")
-        return
-
+    # Выдаем ТЕКСТОМ (без реальной отправки гифта)
     await inc_gift_used()
     safe_name = html.escape(message.from_user.full_name)
     
-    # Твой кастомный текст
     await message.reply(
-        f'<a href="tg://user?id={message.from_user.id}">{safe_name}</a> получает по еблу от @sardelka!\n\n'
-        f"🎁 В подарок: 🧟 Зомби Мишка\n"
+        f'<a href="tg://user?id={message.from_user.id}">{safe_name}</a>, поздравляю, ты выиграл <b>Крутой NFT</b> от @sardelka.\n'
+        f"Напиши ему, чтобы он тебе его выдал.\n\n"
         f"🎉 Шанс был: {DROP_CHANCE}%",
         parse_mode="HTML"
     )
@@ -140,7 +144,7 @@ async def process_successful_payment(message: Message):
     await message.answer("❤️ Спасибо за поддержку!")
 
 # ---------- Запуск ----------
-async def health(request): return web.Response(text="Gift Bot is running!")
+async def health(request): return web.Response(text="NFT Bot is running!")
 
 async def main() -> None:
     await init_db()
