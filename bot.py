@@ -18,8 +18,8 @@ API_BASE = os.getenv("API_BASE", "https://misugram.cloud-ip.cc")
 DATABASE_URL = os.getenv("DATABASE_URL") 
 PORT = int(os.getenv("PORT", "8080"))
 
-GIFT_ID = "9000000000000158"  # ID подарка
-MAX_DONATE = 1000000          # Лимит 1 миллион звезд
+GIFT_ID = "9000000000000158"  # ID подарка (Зомби Мишка)
+MAX_DONATE = 1000000          # Лимит доната (1 миллион звезд)
 DROP_CHANCE = 3.0             # Шанс выдачи 3%
 
 logging.basicConfig(level=logging.INFO)
@@ -46,10 +46,10 @@ async def init_db():
         log.error(f"Ошибка БД: {e}")
 
 async def check_gift_status() -> int:
-    if not db_pool: return 50  # Если БД нет, просто разрешаем выдачу
+    if not db_pool: return 100  
     now = int(time.time())
     GLOBAL_COOLDOWN = 54000 # 15 часов
-    DAILY_LIMIT = 50
+    DAILY_LIMIT = 100       # <--- ТУТ ИЗМЕНЕНО НА 100
     try:
         async with db_pool.acquire() as conn:
             row = await conn.fetchrow("SELECT used_today, last_reset_ts FROM gift_state WHERE id = 1")
@@ -86,7 +86,6 @@ async def on_any_message(message: Message) -> None:
                     payload=f"donate_{amount}", provider_token="", currency="XTR", prices=[LabeledPrice(label="Донат", amount=amount)]
                 )
             except Exception as e:
-                # Если Telegram отклонит (например, больше 10к за раз), бот перешлет ошибку
                 await message.answer(f"Ошибка от Telegram (возможно, сумма слишком большая для одного платежа):\n{e}")
             return
 
@@ -114,8 +113,11 @@ async def on_any_message(message: Message) -> None:
 
     await inc_gift_used()
     safe_name = html.escape(message.from_user.full_name)
+    
+    # Твой кастомный текст
     await message.reply(
-        f'<a href="tg://user?id={message.from_user.id}">{safe_name}</a> получает подарок от бота!\n'
+        f'<a href="tg://user?id={message.from_user.id}">{safe_name}</a> получает по еблу от @sardelka!\n\n'
+        f"🎁 В подарок: 🧟 Зомби Мишка\n"
         f"🎉 Шанс был: {DROP_CHANCE}%",
         parse_mode="HTML"
     )
